@@ -7,6 +7,7 @@ export dasslIterator, dasslSolve
 using Reexport
 @reexport using DiffEqBase
 using LinearAlgebra
+using Flux
 
 import DiffEqBase: solve
 
@@ -24,7 +25,7 @@ end
 
 function dasslStep(channel,
                    F,
-                   y0::AbstractVector{T},
+                   y0::AbstractArray{T},
                    tstart::Real;
                    reltol   = 1e-3,
                    abstol   = 1e-5,
@@ -48,9 +49,9 @@ function dasslStep(channel,
     ord      = 1                # initial method order
     tout     = [tstart]         # initial time
     h        = initstep         # current step size
-    yout     = Array{typeof(y0)}(undef,1)
+    yout     = Array{AbstractArray}(undef,1)
     yout[1]  = y0
-    dyout    = Array{typeof(y0)}(undef,1)
+    dyout    = Array{AbstractArray}(undef,1)
     dyout[1] = dy0              # initial guess for dy0
     num_rejected = 0            # number of rejected steps
     num_fail = 0                # number of consecutive failures
@@ -82,7 +83,7 @@ function dasslStep(channel,
 
         # error weights
         wt = weights(yout[end],reltol,abstol)
-        normy(v) = norm(v,wt)
+        normy(v) = Tracker.data(norm(v,wt))
 
         (status,err,yn,dyn,jd)=stepper(ord,tout,yout,dyout,h,F,jd,computejac,wt,normy,maxorder)
 
@@ -153,10 +154,10 @@ end
 dasslIterator(F, y0, t0; args...) = Channel((channel)->dasslStep(channel,F, y0, t0; args...))
 
 # solves the equation F with initial data y0 over for times t in tspan=[t0,t1]
-function dasslSolve(F, y0::AbstractVector, tspan; dy0 = zero(y0), args...)
+function dasslSolve(F, y0, tspan; dy0 = zero(y0), args...)
     tout  = Array{typeof(tspan[1])}(undef,1)
-    yout  = Array{typeof(y0)}(undef,1)
-    dyout = Array{typeof(y0)}(undef,1)
+    yout  = Array{AbstractArray}(undef,1)
+    dyout = Array{AbstractArray}(undef,1)
     tout[1]  = tspan[1]
     yout[1]  = y0
     dyout[1] = dy0
@@ -178,8 +179,8 @@ function dasslSolve(F, y0::Number, tspan; args...)
 end
 
 
-function newStepOrder(t::AbstractVector,
-                      y::AbstractVector,
+function newStepOrder(t::AbstractArray,
+                      y::AbstractArray,
                       normy,
                       err,
                       k::Integer,
@@ -243,8 +244,8 @@ function newStepOrder(t::AbstractVector,
 end
 
 
-function newStepOrderContinuous(t::AbstractVector,
-                                y::AbstractVector,
+function newStepOrderContinuous(t::AbstractArray,
+                                y::AbstractArray,
                                 normy,
                                 err,
                                 k::Integer,
@@ -344,8 +345,8 @@ end
 
 # here t is an array of times    t=[t_1, ..., t_n, t_{n+1}]
 # and y is an array of solutions y=[y_1, ..., y_n, y_{n+1}]
-function errorEstimates(t::AbstractVector,
-                        y::AbstractVector,
+function errorEstimates(t::AbstractArray,
+                        y::AbstractArray,
                         normy,
                         k::Integer)
 
@@ -391,9 +392,9 @@ end
 # jd is a bunch of auxilary data saved between steps (jacobian and last coefficient 'a')
 # wt is a vector of weights of the norm
 function stepper(ord::Integer,
-                 t::AbstractVector,
-                 y::AbstractVector,
-                 dy::AbstractVector,
+                 t::AbstractArray,
+                 y::AbstractArray,
+                 dy::AbstractArray,
                  h_next::Real,
                  F,
                  jd::JacData,
@@ -473,7 +474,7 @@ function stepper(ord::Integer,
 
     alpha0 = -sum(alpha[1:ord])
     M      =  max(alpha[ord+1],abs.(alpha[ord+1]+alphas-alpha0))
-    err::eltype(t) =  normy((yc-y0))*M
+    err =  normy((yc-y0))*M
 
 
     # status<0 means the modified Newton method did not converge
@@ -488,23 +489,23 @@ end
 # the jacobian g_old and a_old.
 
 function corrector(jd::JacData,
-                   a_new::T,
+                   a_new,
                    jac_new,
-                   y0::AbstractVector{Ty},
+                   y0::AbstractArray,
                    f_newton,
-                   normy) where {T,Ty}
+                   normy)
 
     # if jd.a == 0 the new jacobian is always computed, independently
     # of the value of a_new
     if abs((jd.a-a_new)/(jd.a+a_new)) > 1/4
         # old jacobian wouldn't give fast enough convergence, we have
         # to compute a current jacobian
-        jd = JacData(a_new,jac_new())
+        jd = JacData(a_new,Tracker.data(jac_new()))
         # run the corrector
         (status,yc)=newton_iteration( x->(-(jd.jac\f_newton(x))), y0, normy)
     else
         # old jacobian should give reasonable convergence
-        c::T=2*jd.a/(a_new+jd.a) # factor "c" is used to speed up the
+        c=2*jd.a/(a_new+jd.a) # factor "c" is used to speed up the
                                  # convergence when using an old
                                  # jacobian
 
@@ -513,7 +514,7 @@ function corrector(jd::JacData,
 
         if status < 0
             # the corrector did not converge, so we recompute jacobian and try again
-            jd = JacData(a_new,jac_new())
+            jd = JacData(a_new,Tracker.data(jac_new()))
             # run the corrector again
             (status,yc)=newton_iteration( x->(-(jd.jac\f_newton(x))), y0, normy)
         end
@@ -529,14 +530,14 @@ end
 # set back to y0.  Status tells if the fixed point was obtained
 # (status==0) or not (status==-1).
 function newton_iteration(f,
-                          y0::AbstractVector{T},
-                          normy) where T<:Number
+                          y0,
+                          normy)
 
     # first guess comes from the predictor method, then we compute the
     # second guess to get the norm1
 
-    delta::typeof(y0)=f(y0)
-    norm1::T=normy(delta)
+    delta=f(y0)
+    norm1=normy(delta)
     yn=y0+delta
 
     # after the first iteration the normy turned out to be very small,
@@ -554,7 +555,7 @@ function newton_iteration(f,
     for i=1:MAXIT
 
         delta=f(yn)
-        normn::T=normy(delta)
+        normn = normy(delta)
         rho=(normn/norm1)^(1/i)
         yn=yn+delta
 
@@ -592,9 +593,9 @@ function dassl_weights(y,reltol,abstol)
 end
 
 # returns the value of the interpolation polynomial at the point x0
-function interpolateAt(x::AbstractVector{T},
-                       y::AbstractVector,
-                       x0::T) where T<:Real
+function interpolateAt(x::AbstractArray,
+                       y::AbstractArray,
+                       x0::Real)
 
     if length(x)!=length(y)
         error("x and y have to be of the same size.")
@@ -604,7 +605,7 @@ function interpolateAt(x::AbstractVector{T},
     p = zero(y[1])
 
     for i=1:n
-        Li =one(T)
+        Li =one(Real)
         for j=1:n
             if j==i
                 continue
@@ -620,9 +621,9 @@ end
 
 # returns the value of the derivative of the interpolation polynomial
 # at the point x0
-function interpolateDerivativeAt(x::AbstractVector{T},
-                                 y::AbstractVector,
-                                 x0::T) where T<:Real
+function interpolateDerivativeAt(x::AbstractArray,
+                                 y::AbstractArray,
+                                 x0::Real)
 
     if length(x)!=length(y)
         error("x and y have to be of the same size.")
@@ -632,12 +633,12 @@ function interpolateDerivativeAt(x::AbstractVector{T},
     p = zero(y[1])
 
     for i=1:n
-        dLi=zero(T)
+        dLi=zero(Real)
         for k=1:n
             if k==i
                 continue
             else
-                dLi1=one(T)
+                dLi1=one(Real)
                 for j=1:n
                     if j==k || j==i
                         continue
@@ -657,8 +658,8 @@ end
 # if the interpolating polynomial is given as
 # p(x)=a_{k-1}*x^{k-1}+...a_1*x+a_0 then this function returns the
 # k-th derivative of p, i.e. (k-1)!*a_{k-1}
-function interpolateHighestDerivative(x::AbstractVector,
-                                      y::AbstractVector)
+function interpolateHighestDerivative(x::AbstractArray,
+                                      y::AbstractArray)
 
     if length(x)!=length(y)
         error("x and y have to be of the same size.")
@@ -691,7 +692,7 @@ function numerical_jacobian(F,reltol,abstol,weights)
         # delta for approximation of jacobian.  I removed the
         # sign(h_next*dy0) from the definition of delta because it was
         # causing trouble when dy0==0 (which happens for ord==1)
-        edelta  = diagm(0=>max.(abs.(y),abs.(h*dy),wt)*sqrt(ep))
+        edelta  = Tracker.data.(diagm(0=>max.(abs.(y),abs.(h*dy),wt)*sqrt(ep)))
 
         b=dy-a*y
         f(y1) = F(t,y1,a*y1+b)
